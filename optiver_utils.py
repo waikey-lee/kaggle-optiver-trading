@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from common_utils import downcast_to_32bit
 
 # ========================================================================================
 # 1. EDA Function for this competition
@@ -40,7 +41,7 @@ def filter_df(df, stock_id=None, date_id=None, seconds=None, reset_index=False):
         elif isinstance(input_, str):
             conds_dict[input_arg_name] = (df[input_arg_name] == int(input_))
         elif isinstance(input_, tuple):
-            if len(stock_id) == 2:
+            if len(input_) == 2:
                 conds_dict[input_arg_name] = df[input_arg_name].between(input_[0], input_[1])
             else:
                 print(f"{input_arg_name} tuple shouldn't have more than 2 dimension")
@@ -58,8 +59,33 @@ def filter_df(df, stock_id=None, date_id=None, seconds=None, reset_index=False):
 # ========================================================================================
 # 2. Preprocessing Function for this competition
 # ========================================================================================
-def clean_df(df):
-    df = df.drop(columns=['row_id', 'time_id'], errors="ignore")
+def clean_df(df, columns_to_drop=['row_id', 'time_id']):
+    """
+    Clean and prepare a DataFrame for analysis.
+
+    Args:
+        df (pandas.DataFrame): The input DataFrame to be cleaned.
+        columns_to_drop (list, optional): A list of column names to be dropped from the DataFrame.
+
+    Returns:
+        pandas.DataFrame: The cleaned DataFrame with specified transformations.
+
+    The function cleans and prepares the input DataFrame 'df' for analysis by performing the following operations:
+
+    1. Drops specified columns from the DataFrame based on the 'columns_to_drop' parameter.
+    2. Downcasts numeric columns to 32-bit data types for memory optimization.
+    3. Renames selected columns for improved readability.
+    4. Calculates a new column 'real_imb_size' by multiplying 'imb_size' with 'imb_flag' if 'imb_size' exists in the DataFrame.
+
+    Parameters:
+        - df: The input DataFrame to be cleaned.
+        - columns_to_drop: A list of column names to be dropped. Default columns include 'row_id' and 'time_id'.
+
+    Returns:
+        A cleaned and transformed DataFrame ready for further analysis.
+    """
+    df = df.drop(columns=columns_to_drop, errors="ignore")
+    df = downcast_to_32bit(df)
     df = df.rename(
         columns={
             "seconds_in_bucket": "seconds",
@@ -69,6 +95,9 @@ def clean_df(df):
             "wap": "wa_price", 
         }
     )
+    if "imb_size" in df.columns and "real_imb_size" not in df.columns:
+        position = df.columns.get_loc("imb_size")
+        df.insert(position + 1, "real_imb_size", df["imb_size"] * df["imb_flag"])
     return df
 
 # ========================================================================================
