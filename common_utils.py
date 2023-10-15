@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore', category=UserWarning, message='No warning is r
 # System functions
 # ========================================================================================    
 # Process.memory_info is expressed in bytes, so convert to megabytes
-def check_memory_usage(unit="gb"):
+def check_memory_usage(unit="gb", color=""):
     '''
     Check and print the RAM (memory) usage of the current process in the specified unit.
 
@@ -44,7 +44,9 @@ def check_memory_usage(unit="gb"):
     if unit not in unit_multipliers:
         print(f"The unit provided is not available, available list of units: {list(unit_multipliers.keys())}, default to GB")
         unit = "gb"
-    print(f"RAM used: {psutil.Process().memory_info().rss / unit_multipliers[unit]:.1f} {unit.upper()}")
+    ram_used = psutil.Process().memory_info().rss / unit_multipliers[unit]
+    cprint(f"RAM used: {ram_used:.1f} {unit.upper()}", color=color)
+    return ram_used
 
 def check_memory_by_global_variable(excludes="_", size_threshold=1):
     """
@@ -202,6 +204,10 @@ def downcast_to_32bit(df, excludes=[], verbose=1):
     downcasts their data types to 32-bit (float32 and int32) to save memory. Columns
     specified in the 'excludes' list are skipped.
     """
+    if verbose:
+        cprint("Before downcast: ", end="\t", color="green")
+        check_memory_usage(color="green")
+        
     float64_columns = df.dtypes[df.dtypes == "float64"].index.tolist()
     float64_columns = list_diff(float64_columns, excludes)
     
@@ -213,6 +219,11 @@ def downcast_to_32bit(df, excludes=[], verbose=1):
             df[col] = df[col].astype(np.float32)
         elif col in int64_columns:
             df[col] = df[col].astype(np.int32)
+            
+    if verbose:
+        cprint("After downcast: ", end="\t", color="blue")
+        check_memory_usage(color="blue")
+    
     return df
 
 def my_power(series, factor):
@@ -356,6 +367,7 @@ def plot_feature_importance(features=None, importances=None, imp_df=None, title=
     if imp_df is None:
         imp_df = pd.DataFrame(dict(feature=features, feature_importance=importances))
         imp_df = imp_df.sort_values(by="feature_importance", ascending=ascending).reset_index(drop=True)
+        imp_df["feature_importance_rank"] = imp_df["feature_importance"].rank(ascending=False, method="dense").astype(int)
 
     if limit:
         imp_plot = imp_df.iloc[:limit]
