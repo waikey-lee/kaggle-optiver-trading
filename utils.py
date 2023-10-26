@@ -1,6 +1,7 @@
 # ========================================================================================
 # Import
 # ========================================================================================
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -13,12 +14,20 @@ from datetime import datetime, timedelta
 from itertools import repeat
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
+from pandarallel import pandarallel
+pandarallel.initialize(progress_bar=False, nb_workers=12)
 
 import scipy.cluster.hierarchy as sch
 from scipy.cluster.hierarchy import fcluster
+from scipy.stats import pearsonr, chi2_contingency
 
 # ========================================================================================
 # Master Config
+# ========================================================================================
+# 0. Constants
+# ========================================================================================
+META_COLUMNS = ["stock_id", "date_id", "seconds"]
+
 # ========================================================================================
 # 1. Clipping Config
 # ========================================================================================
@@ -30,6 +39,7 @@ MAX_TARGET = 100 # Target higher than 100 will be clip to 100
 
 MILD_TARGET_LOWER_BOUND = -4.5
 MILD_TARGET_UPPER_BOUND = 4.5
+
 
 # ========================================================================================
 # Settings functions
@@ -153,6 +163,13 @@ def check_auc(df, col, target_col="is_positive_target", verbose=0):
     if auc < 0.5:
         auc = (1 - auc)
     return auc, proportion_drop
+
+def check_target_mean(df, feature_col, target_col="target", feature_class=20, target_class=5, plot_chart=True):
+    feature_class = min(df[feature_col].nunique(), feature_class)
+    df[f"{feature_col}_bins"] = pd.qcut(df[feature_col], q=feature_class, duplicates="drop").cat.codes.replace(-1, np.nan)
+    
+    df.groupby(f"{feature_col}_bins")[target_col].mean().plot()
+    plt.show()
 
 # ========================================================================================
 # Pandas processing functions
@@ -282,7 +299,7 @@ def my_log(series):
     return np.where(
         series >= 0, 
         np.log1p(series), 
-        -(np.log1p(series.abs()))
+        -(np.log1p(np.abs(series)))
     )
 
 def my_concat(df_list, n=4, reset_index=False):
@@ -360,8 +377,78 @@ def cprint(string, color=None, **kwargs):
             print(string, **kwargs)
 
 # ========================================================================================
-# Cheking Functions
+# Validate Feature Functions
 # ======================================================================================== 
+def check_target_dependency(df, feature_col, target_col="target", feature_class=20, target_class=5, 
+                            plot_chart=True, return_table=True, conduct_chi_square_test=True):
+    """
+    Analyze the dependency between a feature and a target variable by creating a contingency table.
+
+    Parameters:
+        df (pandas.DataFrame): The DataFrame containing the data.
+        feature_col (str): The name of the column containing the feature variable.
+        target_col (str, optional): The name of the column containing the target variable (default is "target").
+        feature_class (int, optional): The number of bins for the feature variable (default is 20).
+        target_class (int, optional): The number of bins for the target variable (default is 5).
+        plot_chart (bool, optional): Whether to plot a heatmap of the contingency table (default is True).
+        return_table (bool, optional): Whether to return the contingency table (default is True).
+        conduct_chi_square_test (bool, optional): Whether to conduct a chi-square test on the contingency table (default is True).
+
+    Returns:
+        pd.DataFrame or tuple: Depending on the parameters, returns a contingency table DataFrame
+        (if 'return_table' is True), or a tuple containing chi-squared test statistics
+        (chi2, p_value, dof) if 'return_table' is False and 'conduct_chi_square_test' is True.
+
+    The function calculates the contingency table between 'feature_col' and 'target_col', optionally plots a heatmap of the table,
+    and can conduct a chi-square test to assess the statistical significance of the relationship.
+    """
+    feature_class = min(df[feature_col].nunique(), feature_class)
+    feature_group = pd.qcut(df[feature_col], q=feature_class, duplicates="drop").cat.codes.replace(-1, np.nan)
+    
+    target_group = pd.qcut(df[target_col], q=target_class, duplicates="drop").cat.codes.replace(-1, np.nan)
+    table = pd.crosstab(feature_group, target_group)
+    table.index.name = f"{feature_col}_by_{feature_class}_bins"
+    table.columns.name = f"target_by_{target_class}_bins"
+    
+    if plot_chart:
+        sns.heatmap(table, cmap="coolwarm", fmt=".0f", annot=True)
+        plt.show()
+    
+    if return_table:
+        return table
+    
+    if conduct_chi_square_test:
+        chi2, p_value, dof, expected = chi2_contingency(table)
+        return chi2, p_value, dof
+    
+def run_chi_square_tests(df, target_col="target", thresholds=[10000, 1000, 500]):
+    """
+    Run chi-squared tests to assess the dependency of each feature in the DataFrame on the target variable.
+
+    Parameters:
+        df (pandas.DataFrame): The DataFrame containing the data.
+        target_col (str, optional): The name of the target column (default is "target").
+        thresholds (list, optional): A list of threshold values for categorizing the chi-squared test results
+            into different categories: [leaked_threshold, good_threshold, bad_threshold] (default is [10000, 1000, 500]).
+
+    The function iterates through each feature column in the DataFrame and performs chi-squared tests to evaluate
+    the relationship between the feature and the target variable. The test results are categorized based on the provided
+    threshold values and are color-coded for easy visualization.
+    """
+    empty = " "
+    leaked_threshold, good_threshold, bad_threshold = thresholds
+    for col in df.columns:
+        gap = df.columns.str.len().max() - len(col)
+        cs, p, dof = check_target_dependency(df, target_col=target_col, feature_col=col, return_table=False, plot_chart=False)
+        if cs > leaked_threshold:
+            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, (Should be Leaked)", color="blue")
+        elif cs > good_threshold:
+            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, Useful", color="green")
+        elif cs > bad_threshold:
+            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, Less Useful", color="cyan")
+        else:
+            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, Useless", color="red")
+
 def calculate_psi(expected, actual, buckettype='bins', buckets=1000, axis=0):
     '''Calculate the PSI (population stability index) across all variables
     Args:
@@ -583,10 +670,15 @@ def plot_scatterplot(df, x_col, y_col, hue_col=None, figsize=(18, 10), ticksize=
         ax.legend()
     plt.show()
 
+def plot_heatmap(df, figsize=(15, 8), annot=False, fmt='g'):
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.heatmap(data=df, annot=annot, cmap="coolwarm", fmt=fmt)
+    plt.show()    
+    
 # ========================================================================================
 # COMPETITION FUNCTIONS
 # ========================================================================================
-# 1. EDA Function for this competition
+# 1. EDA Functions for this competition
 # ========================================================================================
 def filter_df(df, stock_id=None, date_id=None, seconds=None, reset_index=False, meta_columns=["stock_id", "date_id", "seconds"]):
     """
@@ -641,7 +733,7 @@ def filter_df(df, stock_id=None, date_id=None, seconds=None, reset_index=False, 
     return df_subset
 
 # ========================================================================================
-# 2. Preprocessing Function for this competition
+# 2. Preprocessing Functions for this competition
 # ========================================================================================
 def clean_df(df, columns_to_drop=['row_id', 'time_id'], verbose=0):
     """
@@ -880,7 +972,346 @@ def scale_base_columns(df, _level_stats_df, base_columns, level_col="stock", joi
     return df
 
 # ========================================================================================
-# 3. Postprocessing Function for this competition
+# 3. Temporal Features Calc Functions
+# ========================================================================================
+def calc_intraday_gradient(intraday_array):
+    """
+    Calculate the intraday gradient (slope) of a time series.
+
+    Parameters:
+        intraday_array (array-like): An array containing the values of a time series for a single intraday period.
+
+    Returns:
+        float: The calculated gradient (slope) of the time series, indicating the rate of change.
+
+    The function computes the gradient of the given time series, which represents the rate of change or slope of the values
+    over time. It uses linear regression to fit a line to the data and returns the gradient of that line. A positive gradient
+    indicates an upward trend, while a negative gradient indicates a downward trend in the time series.
+    """
+    return np.polyfit(range(len(intraday_array)), intraday_array, 1)[0]
+
+def calc_ma_features(df, columns, groupby=["stock_id"], window_sizes=[2]):
+    """
+    Calculate moving average features for specified columns within a DataFrame.
+
+    Parameters:
+        df (pandas.DataFrame): The DataFrame containing the data.
+        columns (list of str): The columns for which moving average features will be calculated.
+        groupby (list of str, optional): The columns to group by before calculating moving averages (default is ["stock_id"]).
+        window_sizes (list of int, optional): The window sizes for the moving averages (default is [2]).
+
+    Returns:
+        pandas.DataFrame: The input DataFrame with additional columns containing moving average features.
+
+    This function calculates moving averages for the specified columns within the DataFrame, grouped by the specified
+    columns (e.g., 'stock_id'). It computes moving averages with different window sizes and adds new columns to the
+    DataFrame to store the results. The column names for moving averages are constructed using the original column names
+    and the window size (e.g., 'column_name_ma2' for a 2-day moving average).
+    """
+    # For all col in columns, calculate the moving average of window size k
+    for k in window_sizes:
+        df[[f"{col}_ma{k}" for col in columns]] = (
+            df.groupby(groupby)[columns].rolling(k).mean()
+        ).values
+    return df
+
+def calc_diff_features(df, columns, groupby=["stock_id"], lag_distances=[1]):
+    """
+    Calculate lag difference features for specified columns within a DataFrame.
+
+    Parameters:
+        df (pandas.DataFrame): The DataFrame containing the data.
+        columns (list of str): The columns for which lag difference features will be calculated.
+        groupby (list of str, optional): The columns to group by before calculating lag differences (default is ["stock_id"]).
+        lag_distances (list of int, optional): The lag distances for calculating differences (default is [1]).
+
+    Returns:
+        pandas.DataFrame: The input DataFrame with additional columns containing lag difference features.
+
+    This function calculates lag difference features for the specified columns within the DataFrame, grouped by the
+    specified columns (e.g., 'stock_id'). It computes differences between values at lag distances and adds new columns
+    to the DataFrame to store the results. The column names for lag differences are constructed using the original column
+    names and the lag distance (e.g., 'column_name_ld1' for a lag difference of 1).
+    """
+    # For all col in columns, calculate the lag difference (Lag 0 - Lag d) values
+    # When d = 1, this is same as first order difference
+    for d in lag_distances:
+        df[[f"{col}_ld{d}" for col in columns]] = (
+            df.groupby(groupby)[columns].diff(d)
+        ).values
+    return df
+
+def calc_pct_chg_features(df, columns, groupby=["stock_id"], lag_distances=[1]):
+    """
+    Calculate percentage change features for specified columns within a DataFrame.
+
+    Parameters:
+        df (pandas.DataFrame): The DataFrame containing the data.
+        columns (list of str): The columns for which percentage change features will be calculated.
+        groupby (list of str, optional): The columns to group by before calculating percentage changes (default is ["stock_id"]).
+        lag_distances (list of int, optional): The lag distances for calculating percentage changes (default is [1]).
+
+    Returns:
+        pandas.DataFrame: The input DataFrame with additional columns containing percentage change features.
+    """
+    # For all col in columns, calculate the lag ratio difference (Lag 0 / Lag d) values
+    for d in lag_distances:
+        df[[f"{col}_pc{d}" for col in columns]] = (
+            df.groupby(groupby)[columns].pct_change(d)
+        ).values
+    return df
+
+def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_periods=[3, 6], verbose=0):
+    """
+    Calculate interday gradient features for specified columns within a DataFrame.
+
+    Parameters:
+        df (pandas.DataFrame): The DataFrame containing the data.
+        columns (list of str): The columns for which interday gradient features will be calculated.
+        groupby (list of str, optional): The columns to group by before calculating interday gradients (default is ["stock_id"]).
+        lookback_periods (list of int, optional): The lookback periods for calculating gradients (default is [3, 6]).
+
+    Returns:
+        pandas.DataFrame: The input DataFrame with additional columns containing interday gradient features.
+
+    This function calculates interday gradient features for the specified columns within the DataFrame, grouped by the
+    specified columns (e.g., 'stock_id'). It computes gradients over specified lookback periods and adds new columns
+    to the DataFrame to store the results. The column names for interday gradients are constructed using the original
+    column names and the lookback period (e.g., 'column_name_3days_gradient' for a 3-day interday gradient).
+    """
+    gradients_dict = dict()
+    for column in tqdm(columns, disable=not verbose):
+        for lookback_period in lookback_periods:
+            gradient_list = []
+            for i, w in enumerate(df.groupby(groupby)[column].rolling(lookback_period)):
+                if len(w) < lookback_period:
+                    gradient_list.append(np.nan)
+                else:
+                    gradient, intercept = np.polyfit(range(len(w)), w, 1)
+                    gradient_list.append(gradient)
+            gradients_dict[f"{column}_{lookback_period}days_gradient"] = gradient_list
+            
+    gradients_df = pd.DataFrame(gradients_dict)
+    df[gradients_df.columns] = gradients_df.values
+    return df
+
+# ========================================================================================
+# 4. Master feature engineering functions for this competition
+# ========================================================================================
+def get_master_daily_target_data(master_df, verbose=0):
+    # Sort the dataframe first
+    master_df = master_df.sort_values(by=META_COLUMNS).reset_index(drop=True)
+    
+    master_daily_target_data = []
+    for round_, seconds_period in tqdm(enumerate([(0, 540), (0, 290), (300, 540)]), disable=not verbose):
+        # Filter dataframe
+        master_subset = filter_df(master_df, seconds=seconds_period)
+        
+        # Calc the gradients for the intraday array
+        daily_target_grads = master_subset.groupby(["stock_id", "date_id"])["target"].apply(calc_intraday_gradient).apply(pd.Series)
+        daily_target_grads.columns = [f"target_r{round_}_grad"]
+        daily_target_grads.drop(columns=f"target_r{round_}_intercept", errors="ignore", inplace=True)
+        
+        # Compute the agg statistics of target variable for every day
+        daily_target_stats = master_subset.groupby(["stock_id", "date_id"])["target"].agg(["mean", "std", "min", "max"]).add_prefix(f"daily_target_r{round_}_")
+
+        # Compute the first order difference then the agg statistics (only mean is good I think) of target variable for every day
+        master_subset["target_fod"] = master_subset.groupby(["stock_id", "date_id"])["target"].diff(1)
+        daily_target_fod_stats = master_subset.groupby(["stock_id", "date_id"])["target_fod"].agg(["mean"]).add_prefix(f"target_fod_r{round_}_")
+
+        master_subset["target_sod"] = master_subset.groupby(["stock_id", "date_id"])["target_fod"].diff(1)
+        daily_target_sod_stats = master_subset.groupby(["stock_id", "date_id"])["target_sod"].agg(["mean"]).add_prefix(f"target_sod_r{round_}_")
+
+        # Horizontally stack all the dataframes above
+        daily_target_data = pd.concat([daily_target_grads, daily_target_stats, daily_target_fod_stats, daily_target_sod_stats], axis=1)
+        
+        # Append this dataframe for this master df subset into list
+        master_daily_target_data.append(daily_target_data)
+    
+    master_daily_target_data = pd.concat(master_daily_target_data, axis=1)
+    return master_daily_target_data
+
+def generate_interday_target_features(daily_target_data, merge_gt=False, shift=True, verbose=0):
+    # if shift:
+    #     # Shift the target agg value to avoid future data leakage
+    #     lag_daily_target_data = daily_target_data.shift(1)
+    # else:
+    lag_daily_data = daily_target_data
+    
+    # Generate features for intraday gradient columns
+    gradient_columns = get_cols(lag_daily_data, endswith="grad")
+    lag_daily_data = calc_diff_features(lag_daily_data, columns=gradient_columns, groupby=["stock_id"], lag_distances=[1])
+    lag_daily_data = calc_ma_features(lag_daily_data, columns=gradient_columns, groupby=["stock_id"], window_sizes=[2])
+    
+    # # Generate features for intraday standard deviation columns
+    # std_columns = get_cols(lag_daily_target_data, endswith="std")
+    # lag_daily_target_data = calc_pct_chg_features(lag_daily_target_data, columns=std_columns, groupby=["stock_id"], lag_distances=[1])
+    
+    # Generate interday gradient features for intraday agg stat columns
+    if verbose:
+        cprint(f"Generating Interday gradient features for each column...", color="blue")
+    agg_stat_columns = get_cols(lag_daily_data, endswith=["mean", "min", "max", "std"], excludes=["ground_truth", "fod", "sod"])
+    lag_daily_data = calc_interday_gradient_features(lag_daily_data, agg_stat_columns, groupby=["stock_id"], lookback_periods=[3, 6], verbose=verbose)
+    
+    # We are using data from N days ago to today for building features, but we can only use it for tmr, so we increment date_id by 1
+    lag_daily_data = lag_daily_data.reset_index()
+    lag_daily_data["date_id"] += 1
+    lag_daily_data = lag_daily_data.set_index(["stock_id", "date_id"])
+    
+    # Merge the target mean per day for feature analysis
+    if merge_gt:
+        lag_daily_data = lag_daily_data.merge(
+            daily_target_data["daily_target_r0_mean"].rename("daily_ground_truth_mean"), 
+            left_on=["stock_id", "date_id"], right_index=True, how="left"
+        )
+    return lag_daily_data
+
+def get_master_daily_price_data(master_df, verbose=0):
+    # Sort the dataframe first
+    master_df = master_df.sort_values(by=META_COLUMNS).reset_index(drop=True)
+    
+    master_daily_price_data = []
+    for round_, seconds_period in tqdm(enumerate([(0, 540), (0, 290), (300, 540)]), disable=not verbose):
+        # Filter dataframe
+        master_subset = filter_df(master_df, seconds=seconds_period)
+        
+        # No matter how, also exclude far price and near price
+        if seconds_period[0] == 300:
+            price_columns = get_cols(master_df, contains="price", excludes=["far", "near"])
+        else:
+            price_columns = get_cols(master_df, contains="price", excludes=["far", "near"])
+        
+        # Calc the gradients for the intraday array (multiply by 100 to avoid underflow?)
+        daily_price_grads = master_subset.groupby(["stock_id", "date_id"])[price_columns].apply(calc_intraday_gradient).apply(pd.Series) * 100
+        daily_price_grads.columns = [f"{price_col}_r{round_}_grad" for price_col in price_columns]
+        
+        # Compute the agg statistics of target variable for every day
+        daily_price_stats = master_subset.groupby(["stock_id", "date_id"])[price_columns].agg(["mean", "std", "min", "max", "last"])
+        daily_price_stats.columns = daily_price_stats.columns.map(f'_r{round_}_'.join)
+
+        # Compute the first order difference then the agg statistics (only mean is good I think) of target variable for every day
+        master_subset = calc_diff_features(master_subset, columns=price_columns, groupby=["stock_id", "date_id"], lag_distances=[1])
+        fod_columns = master_subset.iloc[:, -len(price_columns):].columns
+        
+        daily_price_fod_stats = master_subset.groupby(["stock_id", "date_id"])[fod_columns].agg(["mean"]) * 100
+        daily_price_fod_stats.columns = daily_price_fod_stats.columns.map(f'_r{round_}_'.join)
+        
+        # Horizontally stack all the dataframes above
+        daily_price_data = pd.concat([daily_price_grads, daily_price_stats, daily_price_fod_stats], axis=1)
+        
+        # Append this dataframe for this master df subset into list
+        master_daily_price_data.append(daily_price_data)
+    
+    master_daily_price_data = pd.concat(master_daily_price_data, axis=1)
+    return master_daily_price_data
+
+def generate_interday_price_features(daily_price_data, merge_gt=False, shift=True, verbose=0):
+    # if shift:
+    #     # Shift the target agg value to avoid future data leakage
+    #     lag_daily_price_data = daily_price_data.shift(1)
+    # else:
+    lag_daily_data = daily_price_data
+    
+    # Generate features for intraday gradient columns
+    gradient_columns = get_cols(lag_daily_data, endswith="grad")
+    lag_daily_data = calc_diff_features(lag_daily_data, columns=gradient_columns, groupby=["stock_id"], lag_distances=[1])
+    lag_daily_data = calc_ma_features(lag_daily_data, columns=gradient_columns, groupby=["stock_id"], window_sizes=[2])
+    
+    # # Generate features for intraday standard deviation columns
+    # std_columns = get_cols(lag_daily_target_data, endswith="std")
+    # lag_daily_target_data = calc_pct_chg_features(lag_daily_target_data, columns=std_columns, groupby=["stock_id"], lag_distances=[1])
+    
+    # Generate interday gradient features for intraday agg stat columns
+    if verbose:
+        cprint(f"Generating Interday gradient features for each column...", color="blue")
+        
+    agg_stat_columns = get_cols(lag_daily_data, endswith=["mean", "std", "last"], excludes=["ground_truth", "fod", "sod"])
+    lag_daily_data = calc_interday_gradient_features(lag_daily_data, agg_stat_columns, groupby=["stock_id"], lookback_periods=[3, 6], verbose=verbose)
+    
+    # We are using data from N days ago to today for building features, but we can only use it for tmr, so we increment date_id by 1
+    lag_daily_data = lag_daily_data.reset_index()
+    lag_daily_data["date_id"] += 1
+    lag_daily_data = lag_daily_data.set_index(["stock_id", "date_id"])
+    
+    # Merge the target mean per day for feature analysis
+    if merge_gt:
+        lag_daily_data = lag_daily_data.merge(
+            daily_target_data["daily_target_r0_mean"].rename("daily_ground_truth_mean"), 
+            left_on=["stock_id", "date_id"], right_index=True, how="left"
+        )
+    return lag_daily_data
+
+def get_master_daily_volume_data(master_df, verbose=0):
+    # Sort the dataframe first
+    master_df = master_df.sort_values(by=META_COLUMNS).reset_index(drop=True)
+    
+    master_daily_data = []
+    for round_, seconds_period in tqdm(enumerate([(0, 540), (0, 290), (300, 540)]), disable=not verbose):
+        # Filter dataframe
+        master_subset = filter_df(master_df, seconds=seconds_period)
+        master_subset["trade_size"] = master_subset["bid_size"] + master_subset["ask_size"]
+        
+        # Get volume columns
+        volume_columns = get_cols(master_subset, contains="size", excludes=["bid", "ask"])
+        
+        # Calc the gradients for the intraday array (multiply by 100 to avoid underflow?)
+        daily_grads = master_subset.groupby(["stock_id", "date_id"])[volume_columns].apply(calc_intraday_gradient).apply(pd.Series)
+        daily_grads.columns = [f"{col}_r{round_}_grad" for col in volume_columns]
+        
+        # Compute the agg statistics of target variable for every day
+        daily_stats = master_subset.groupby(["stock_id", "date_id"])[volume_columns].agg(["mean", "std", "min", "max"])
+        daily_stats.columns = daily_stats.columns.map(f'_r{round_}_'.join)
+
+        # Compute the first order difference then the agg statistics (only mean is good I think) of target variable for every day
+        master_subset = calc_diff_features(master_subset, columns=volume_columns, groupby=["stock_id", "date_id"], lag_distances=[1])
+        fod_columns = master_subset.iloc[:, -len(volume_columns):].columns
+        
+        daily_fod_stats = master_subset.groupby(["stock_id", "date_id"])[fod_columns].agg(["mean"])
+        daily_fod_stats.columns = daily_fod_stats.columns.map(f'_r{round_}_'.join)
+        
+        # Horizontally stack all the dataframes above
+        daily_data = pd.concat([daily_grads, daily_stats, daily_fod_stats], axis=1)
+        
+        # Append this dataframe for this master df subset into list
+        master_daily_data.append(daily_data)
+    
+    master_daily_data = pd.concat(master_daily_data, axis=1)
+    return master_daily_data
+
+def generate_interday_volume_features(daily_volume_data, merge_gt=False, shift=True, verbose=0):
+    # if shift:
+    #     # Shift the interday value to avoid future data leakage
+    #     lag_daily_data = daily_volume_data.shift(1)
+    # else:
+    lag_daily_data = daily_volume_data
+    
+    # Generate features for intraday gradient columns
+    gradient_columns = get_cols(lag_daily_data, endswith="grad")
+    lag_daily_data = calc_diff_features(lag_daily_data, columns=gradient_columns, groupby=["stock_id"], lag_distances=[1])
+    lag_daily_data = calc_ma_features(lag_daily_data, columns=gradient_columns, groupby=["stock_id"], window_sizes=[2])
+    
+    # Generate interday gradient features for intraday agg stat columns
+    if verbose:
+        cprint(f"Generating Interday gradient features for each column...", color="blue")
+        
+    agg_stat_columns = get_cols(lag_daily_data, endswith=["mean", "min", "max", "std"], excludes=["ground_truth", "fod", "sod"])
+    lag_daily_data = calc_interday_gradient_features(lag_daily_data, agg_stat_columns, groupby=["stock_id"], lookback_periods=[3, 6], verbose=verbose)
+    
+    # We are using data from N days ago to today for building features, but we can only use it for tmr, so we increment date_id by 1
+    lag_daily_data = lag_daily_data.reset_index()
+    lag_daily_data["date_id"] += 1
+    lag_daily_data = lag_daily_data.set_index(["stock_id", "date_id"])
+    
+    # Merge the target mean per day for feature analysis
+    if merge_gt:
+        lag_daily_data = lag_daily_data.merge(
+            daily_target_data["daily_target_r0_mean"].rename("daily_ground_truth_mean"), 
+            left_on=["stock_id", "date_id"], right_index=True, how="left"
+        )
+    return lag_daily_data
+
+# ========================================================================================
+# 5. Postprocessing Function for this competition
 # ========================================================================================
 def goto_conversion(listOfOdds, total=1, eps=1e-6, isAmericanOdds=False):
     """
@@ -939,3 +1370,58 @@ def zero_sum(listOfPrices, listOfVolumes):
     step = sum(listOfPrices)/sum(listOfSe)
     outputListOfPrices = [x - (y*step) for x,y in zip(listOfPrices, listOfSe)]
     return outputListOfPrices
+
+# ========================================================================================
+# 4. Preparation Function for inference simulation
+# ========================================================================================
+def setup_validation_zip(data_dir, val_start_date=421, val_end_date=480):
+    """
+    Prepare data for validation using a zip iterator.
+
+    Parameters:
+        data_dir (str): The directory containing the data files.
+        val_start_date (int, optional): The starting date for the validation data (default is 421).
+        val_end_date (int, optional): The ending date for the validation data (default is 480).
+
+    Returns:
+        zip: A zip iterator containing three components: (dataframes, revealed_targets, submissions).
+    """
+    master_df = pd.read_csv(f"{data_dir}/optiver-trading-at-the-close/train.csv")
+    val = master_df.loc[master_df["date_id"] >= val_start_date].reset_index(drop=True)
+    
+    iter_test = joblib.load(f'{data_dir}/optiver-test-data/iter_test_copy.pkl')
+    for count, (sample_chunk, sample_revealed_target, sample_sub) in enumerate(iter_test):
+        if count == 1:
+            break
+    
+    df_list, revealed_target_list, submission_list = [], [], []
+    for date_id in tqdm(range(val_start_date, val_end_date + 1)):
+        for seconds in np.arange(0, 550, 10):
+            # Append test dataframe chunk
+            df = filter_df(val, date_id=date_id, seconds=seconds, reset_index=True, meta_columns=["stock_id", "date_id", "seconds_in_bucket"])
+            df = df.drop(columns=["time_id", "target"])
+            df_list.append(df)
+
+            # Append revealed targets dataframe chunk
+            if seconds > 0:
+                temp = sample_revealed_target.copy()
+                temp["date_id"] = date_id
+                temp["seconds_in_bucket"] = seconds
+            else:
+                # Get yesterday revealed targets
+                temp = filter_df(master_df, date_id=int(date_id-1), reset_index=True, meta_columns=["stock_id", "date_id", "seconds_in_bucket"])
+                temp = temp[["stock_id", "date_id", "seconds_in_bucket", "target"]].rename(
+                    columns={"target": "revealed_target"}
+                )
+                temp["revealed_date_id"] = temp["date_id"]
+                temp["date_id"] += 1
+                temp["revealed_time_id"] = (temp["revealed_date_id"] * 55 + temp["seconds_in_bucket"]).astype(int)
+
+            revealed_target_list.append(temp)
+
+            # Append submission dataframe chunk
+            sub = df[["row_id"]].copy()
+            sub["target"] = 0
+            submission_list.append(sub)
+    
+    return zip(df_list, revealed_target_list, submission_list)
