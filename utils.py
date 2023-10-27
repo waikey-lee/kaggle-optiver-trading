@@ -1,6 +1,7 @@
 # ========================================================================================
 # Import
 # ========================================================================================
+import gc
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -527,7 +528,95 @@ def calculate_psi(expected, actual, buckettype='bins', buckets=1000, axis=0):
 
 # ========================================================================================
 # Gradient Boosting Functions
-# ======================================================================================== 
+# ========================================================================================
+def get_lgbm_dataset(df, start_date, end_date, feature_list, target="target", free_raw_data=True):
+    """
+    Create a LightGBM dataset for training or testing with the specified data.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame containing the data.
+        start_date (int): The start date for filtering the data.
+        end_date (int): The end date for filtering the data.
+        feature_list (list): A list of feature column names.
+        target (str, optional): The name of the target column (default is "target").
+        free_raw_data (bool, optional): Whether to keep the raw data free after creating the dataset (default is True).
+
+    Returns:
+        lgb.Dataset: A LightGBM dataset ready for training or testing.
+    """
+    df_subset = filter_df(df, date_id=(start_date, end_date))
+    data = lgb.Dataset(
+        df_subset.loc[:, feature_list], 
+        df_subset[target],
+        free_raw_data=free_raw_data
+    )
+    return data
+
+# Define the custom evaluation metric for MAE
+def lgbm_feval_mae(preds, train_data):
+    """
+    Custom evaluation metric for Mean Absolute Error (MAE) in LightGBM.
+
+    Parameters:
+        preds (array-like): Predicted values from the model.
+        train_data (lgb.Dataset): Training data containing labels.
+
+    Returns:
+        tuple: A tuple containing the metric name ('mae'), the calculated MAE value, and a flag (False).
+    """
+    labels = train_data.get_label()
+    mae = np.abs(preds - labels).mean()
+    return 'mae', mae, False
+
+def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", train_start_date=0, train_end_date=420, val_end_date=480, eval_freq=100, get_val_pred=True):
+    """
+    Train a LightGBM model with the specified data and parameters.
+
+    Parameters:
+        data (pd.DataFrame): The input data containing features and target variables.
+        feature_list (list): A list of feature column names.
+        lgbm_params (dict): LightGBM model hyperparameters.
+        train_target (str, optional): The name of the target column for training (default is "clipped_target").
+        train_start_date (int, optional): The start date for training data (default is 0).
+        train_end_date (int, optional): The end date for training data (default is 420).
+        val_end_date (int, optional): The end date for validation data (default is 480).
+        eval_freq (int, optional): Evaluation frequency during training (default is 100).
+        get_val_pred (bool, optional): Whether to obtain validation predictions (default is True).
+
+    Returns:
+        tuple: A tuple containing the trained LightGBM model, a DataFrame with validation predictions (if requested), and the best MAE score achieved during training.
+    """
+    cprint(f"{get_time_now()} Preparing Dataset...", color="green")
+    train_data = get_lgbm_dataset(data, start_date=train_start_date, end_date=train_end_date, feature_list=feature_list, target=train_target) 
+    valid_data = get_lgbm_dataset(data, start_date=train_end_date + 1, end_date=val_end_date, feature_list=feature_list, target="target", free_raw_data=False)
+    
+    cprint(f"{get_time_now()} Training...", color="green")
+    model = lgb.train(
+        params=lgbm_params,
+        train_set=train_data, 
+        valid_sets=[valid_data, train_data], 
+        feval=lgbm_feval_mae, 
+        # categorical_feature=["stock_id"],
+        callbacks=[
+            log_evaluation(eval_freq),
+            early_stopping(eval_freq, first_metric_only=True, verbose=True, min_delta=1e-4)
+        ]
+    )
+    best_score = model.best_score["valid_0"]["l1"]
+    del train_data
+    gc.collect()
+    
+    if get_val_pred:
+        cprint(f"{get_time_now()} Getting Validation Prediction...", color="green")
+        val_df = filter_df(data, date_id=(train_end_date + 1, val_end_date))[META_COLUMNS].reset_index(drop=True)
+        val_df["val_pred"] = model.predict(valid_data.get_data())
+    else:
+        val_df = pd.DataFrame()
+        
+    del valid_data
+    
+    return model, val_df, best_score
+
 # Plot feature importances
 def plot_feature_importance(features=None, importances=None, imp_df=None, title=None, limit=50, 
                             figsize=(16, 9), ascending=False, plot_chart=True, return_df=False):
@@ -670,7 +759,7 @@ def plot_scatterplot(df, x_col, y_col, hue_col=None, figsize=(18, 10), ticksize=
         ax.legend()
     plt.show()
 
-def plot_heatmap(df, figsize=(15, 8), annot=False, fmt='g'):
+def plot_heatmap(df, figsize=(15, 8), annot=False, fmt='.3g'):
     fig, ax = plt.subplots(figsize=figsize)
     sns.heatmap(data=df, annot=annot, cmap="coolwarm", fmt=fmt)
     plt.show()    
@@ -678,7 +767,7 @@ def plot_heatmap(df, figsize=(15, 8), annot=False, fmt='g'):
 # ========================================================================================
 # COMPETITION FUNCTIONS
 # ========================================================================================
-# 1. EDA Functions for this competition
+# 1. Preprocessing Functions for this competition
 # ========================================================================================
 def filter_df(df, stock_id=None, date_id=None, seconds=None, reset_index=False, meta_columns=["stock_id", "date_id", "seconds"]):
     """
@@ -732,9 +821,25 @@ def filter_df(df, stock_id=None, date_id=None, seconds=None, reset_index=False, 
         df_subset = df_subset.reset_index(drop=True)
     return df_subset
 
-# ========================================================================================
-# 2. Preprocessing Functions for this competition
-# ========================================================================================
+def sort_df(df, sort_by=META_COLUMNS, reset_index=True):
+    """
+    Sort a DataFrame based on specified columns.
+
+    Parameters:
+        df (pd.DataFrame): The DataFrame to be sorted.
+        sort_by (list, optional): A list of column names to sort the DataFrame by (default is META_COLUMNS).
+        reset_index (bool, optional): Whether to reset the index after sorting (default is True).
+
+    Returns:
+        pd.DataFrame: The sorted DataFrame.
+    """
+    df = df.sort_values(by=sort_by)
+    gc.collect()
+    if reset_index:
+        return df.reset_index(drop=True)
+    else:
+        return df
+
 def clean_df(df, columns_to_drop=['row_id', 'time_id'], verbose=0):
     """
     Clean and prepare a DataFrame for analysis.
@@ -771,13 +876,13 @@ def clean_df(df, columns_to_drop=['row_id', 'time_id'], verbose=0):
             "wap": "wa_price", 
         }
     )
+    # Remove rows with missing imb_size (it can be any price / volume columns)
+    # The assumption here is one missing => whole stock-date missing
+    null_imb_size_index = df.loc[df["imb_size"].isnull()].index.tolist()
+    df = df.drop(null_imb_size_index, axis=0, errors="ignore")
     
-    # if "imb_size" in df.columns and "real_imb_size" not in df.columns:
-    #     position = df.columns.get_loc("imb_size")
-    #     df.insert(position + 1, "real_imb_size", df["imb_size"] * df["imb_flag"])
-    
-    ## I don't think the absolute magnitude is useful, we can replace it first
-    ## if we want to get the magnitude of raw imb volume, I can always take the abs() later
+    # I don't think the absolute magnitude is useful, we can replace it first
+    # if we want to get the magnitude of raw imb volume, we can always take the abs() later
     if "imb_size" in df.columns:
         df["imb_size"] = df["imb_size"] * df["imb_flag"]
         
@@ -972,7 +1077,11 @@ def scale_base_columns(df, _level_stats_df, base_columns, level_col="stock", joi
     return df
 
 # ========================================================================================
-# 3. Temporal Features Calc Functions
+# 2. Cross Sectional Features Functions
+# ========================================================================================
+
+# ========================================================================================
+# 3. Temporal Features Functions
 # ========================================================================================
 def calc_intraday_gradient(intraday_array):
     """
@@ -1372,7 +1481,7 @@ def zero_sum(listOfPrices, listOfVolumes):
     return outputListOfPrices
 
 # ========================================================================================
-# 4. Preparation Function for inference simulation
+# 6. Preparation Function for inference simulation
 # ========================================================================================
 def setup_validation_zip(data_dir, val_start_date=421, val_end_date=480):
     """
