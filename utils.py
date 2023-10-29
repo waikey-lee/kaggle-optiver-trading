@@ -907,7 +907,7 @@ def sort_df(df, sort_by=META_COLUMNS, reset_index=True):
     else:
         return df
 
-def clean_df(df, columns_to_drop=['row_id', 'time_id'], verbose=0):
+def clean_df(df, columns_to_drop=['row_id', 'time_id'], drop_null=False, verbose=0):
     """
     Clean and prepare a DataFrame for analysis.
 
@@ -934,23 +934,25 @@ def clean_df(df, columns_to_drop=['row_id', 'time_id'], verbose=0):
     """
     df = df.drop(columns=columns_to_drop, errors="ignore")
     df = downcast_to_32bit(df, verbose=verbose)
-    df = df.rename(
-        columns={
-            "seconds_in_bucket": "seconds",
-            "imbalance_size": "imb_size",
-            "imbalance_buy_sell_flag": "imb_flag",
-            "reference_price": "ref_price",
-            "wap": "wa_price", 
-        }
-    )
+    if "wap" in df.columns:
+        df = df.rename(
+            columns={
+                "seconds_in_bucket": "seconds",
+                "imbalance_size": "imb_size",
+                "imbalance_buy_sell_flag": "imb_flag",
+                "reference_price": "ref_price",
+                "wap": "wa_price", 
+            }
+        )
     # Remove rows with missing imb_size (it can be any price / volume columns)
     # The assumption here is one missing => whole stock-date missing
-    null_imb_size_index = df.loc[df["imb_size"].isnull()].index.tolist()
-    df = df.drop(null_imb_size_index, axis=0, errors="ignore")
+    if drop_null:
+        null_imb_size_index = df.loc[df["imb_size"].isnull()].index.tolist()
+        df = df.drop(null_imb_size_index, axis=0, errors="ignore")
     
     # I don't think the absolute magnitude is useful, we can replace it first
     # if we want to get the magnitude of raw imb volume, we can always take the abs() later
-    if "imb_size" in df.columns:
+    if "imb_size" in df.columns and df["imb_size"].min() >= 0:
         df["imb_size"] = df["imb_size"] * df["imb_flag"]
         
     return df
@@ -1003,9 +1005,9 @@ def get_volume_clippers(df, volume_cols, volume_clip_upper_percentile=VOLUME_CLI
     volume_clippers = {}
     for volume_col in volume_cols:
         upper_bound = int(round(np.percentile(df[volume_col].dropna(), 100 - volume_clip_upper_percentile), -3))
-        volume_clippers[volume_col] = (-np.inf, upper_bound)
+        volume_clippers[volume_col] = (-upper_bound, upper_bound)
         cprint(f"For {volume_col}, the global clip bound is", end=" ", color="blue")
-        cprint(f"(-inf, {upper_bound:,.0f})", color="green")
+        cprint(f"(-{upper_bound:,.0f}, {upper_bound:,.0f})", color="green")
     return volume_clippers
 
 def clip_df(df, price_clippers=None, volume_clippers=None):
