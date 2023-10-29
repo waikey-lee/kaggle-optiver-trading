@@ -22,6 +22,9 @@ import scipy.cluster.hierarchy as sch
 from scipy.cluster.hierarchy import fcluster
 from scipy.stats import pearsonr, chi2_contingency
 
+import lightgbm as lgb
+from lightgbm import LGBMRegressor, log_evaluation, early_stopping
+
 # ========================================================================================
 # Master Config
 # ========================================================================================
@@ -109,7 +112,13 @@ def get_time_now():
 
 # ========================================================================================
 # Common Functions
-# ========================================================================================    
+# ========================================================================================
+def percentile(n):
+    def percentile_(x):
+        return x.quantile(n)
+    percentile_.__name__ = 'pct{:02.0f}'.format(n*100)
+    return percentile_
+
 def list_diff(list1, list2, sort=False):
     """
     Compute the difference between two lists and optionally sort the result.
@@ -126,6 +135,34 @@ def list_diff(list1, list2, sort=False):
     if sort:
         result = sorted(result)
     return result
+
+def read_data(path='', columns=None, **kwargs):
+    """
+    Read data from various file formats and return it as a DataFrame.
+
+    Parameters:
+        path (str): The path to the data file to be read.
+        columns (list, optional): A list of column names to select from the data (default is None).
+        **kwargs: Additional keyword arguments specific to the data reading method.
+
+    Returns:
+        pd.DataFrame or str: A Pandas DataFrame containing the data, or "Nothing" if the file format is unknown.
+    """
+    if path.endswith(".parquet"):
+        if columns is not None:
+            data = pd.read_parquet(path, columns=columns, **kwargs)
+        else:
+            data = pd.read_parquet(path, **kwargs)
+    elif path.endswith(".ftr"):
+        data = pd.read_feather(path, **kwargs)
+    elif path.endswith(".csv"):
+        data = pd.read_csv(path, **kwargs)
+    elif path.endswith(".pkl"):
+        data = joblib.load(path, **kwargs)
+    else:
+        print("Unknown file format")
+        data = "Nothing"
+    return data
 
 # ========================================================================================
 # EDA check functions
@@ -380,8 +417,9 @@ def cprint(string, color=None, **kwargs):
 # ========================================================================================
 # Validate Feature Functions
 # ======================================================================================== 
-def check_target_dependency(df, feature_col, target_col="target", feature_class=20, target_class=5, 
-                            plot_chart=True, return_table=True, conduct_chi_square_test=True):
+def check_target_dependency(df, feature_col, target_col="target", feature_class=50, target_class=10, 
+                            lower_bound=-1e10, upper_bound=1e10, 
+                            plot_chart=True, return_table=True, conduct_chi_square_test=True, verbose=0):
     """
     Analyze the dependency between a feature and a target variable by creating a contingency table.
 
@@ -403,10 +441,16 @@ def check_target_dependency(df, feature_col, target_col="target", feature_class=
     The function calculates the contingency table between 'feature_col' and 'target_col', optionally plots a heatmap of the table,
     and can conduct a chi-square test to assess the statistical significance of the relationship.
     """
-    feature_class = min(df[feature_col].nunique(), feature_class)
-    feature_group = pd.qcut(df[feature_col], q=feature_class, duplicates="drop").cat.codes.replace(-1, np.nan)
+    if df[feature_col].nunique() < 300:
+        feature_class = df[feature_col].nunique()
+        
+    # Clip to avoid infinity, then bin the feature
+    feature_series = df[feature_col].clip(lower_bound, upper_bound)
+    feature_group = pd.qcut(feature_series, q=feature_class, duplicates="drop").cat.codes.replace(-1, np.nan)
     
+    # Bin the target
     target_group = pd.qcut(df[target_col], q=target_class, duplicates="drop").cat.codes.replace(-1, np.nan)
+    
     table = pd.crosstab(feature_group, target_group)
     table.index.name = f"{feature_col}_by_{feature_class}_bins"
     table.columns.name = f"target_by_{target_class}_bins"
@@ -414,42 +458,62 @@ def check_target_dependency(df, feature_col, target_col="target", feature_class=
     if plot_chart:
         sns.heatmap(table, cmap="coolwarm", fmt=".0f", annot=True)
         plt.show()
-    
-    if return_table:
-        return table
-    
+
     if conduct_chi_square_test:
         chi2, p_value, dof, expected = chi2_contingency(table)
-        return chi2, p_value, dof
-    
-def run_chi_square_tests(df, target_col="target", thresholds=[10000, 1000, 500]):
+        if verbose:
+            print(chi2, p_value, dof)
+        
+    if return_table:
+        return table, chi2, p_value, dof, expected
+    else:
+        return chi2, p_value, dof, expected
+
+def run_chi_square_tests(df, feature_columns=None, target_col="target", feature_class=50, target_class=10, min_log_p=-400, plot_chart=False, return_table=True):
     """
-    Run chi-squared tests to assess the dependency of each feature in the DataFrame on the target variable.
+    Perform chi-square tests for feature-target independence and return log-transformed p-values.
 
     Parameters:
-        df (pandas.DataFrame): The DataFrame containing the data.
+        df (pd.DataFrame): The input DataFrame containing data to analyze.
+        feature_columns (list, optional): A list of feature column names to analyze. If None, it's inferred from the DataFrame (default is None).
         target_col (str, optional): The name of the target column (default is "target").
-        thresholds (list, optional): A list of threshold values for categorizing the chi-squared test results
-            into different categories: [leaked_threshold, good_threshold, bad_threshold] (default is [10000, 1000, 500]).
+        feature_class (int, optional): The number of classes (bins) for the feature variable (default is 50).
+        target_class (int, optional): The number of classes (bins) for the target variable (default is 10).
+        min_log_p (float, optional): The minimum log-transformed p-value to clip values below (default is -400).
+        plot_chart (bool, optional): Whether to plot a bar chart of log-transformed p-values (default is False).
+        return_table (bool, optional): Whether to return log-transformed p-values in a DataFrame (default is True).
 
-    The function iterates through each feature column in the DataFrame and performs chi-squared tests to evaluate
-    the relationship between the feature and the target variable. The test results are categorized based on the provided
-    threshold values and are color-coded for easy visualization.
+    Returns:
+        pd.DataFrame or tuple: If return_table is True, returns a DataFrame containing log-transformed p-values for each feature.
+        If plot_chart is True, also plots a bar chart of log-transformed p-values.
     """
-    empty = " "
-    leaked_threshold, good_threshold, bad_threshold = thresholds
-    for col in df.columns:
-        gap = df.columns.str.len().max() - len(col)
-        cs, p, dof = check_target_dependency(df, target_col=target_col, feature_col=col, return_table=False, plot_chart=False)
-        if cs > leaked_threshold:
-            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, (Should be Leaked)", color="blue")
-        elif cs > good_threshold:
-            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, Useful", color="green")
-        elif cs > bad_threshold:
-            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, Less Useful", color="cyan")
-        else:
-            cprint(f"Feature: {col},{empty*gap} χ^2 test stats: {cs:.0f}, Useless", color="red")
+    if feature_columns is None:
+        feature_columns = list_diff(df.columns, ["stock_id", "date_id", "clipped_target", "target", "is_positive_target", "is_mild_target"])
+    
+    log_p_values_dict = {}
+    for column_name in tqdm(feature_columns):
+        log_p_values = []
+        for stock_id in range(200):
+            chi2, p_value, dof, expected = check_target_dependency(
+                filter_df(df, stock_id=stock_id), feature_col=column_name, feature_class=feature_class, target_class=target_class, 
+                plot_chart=False, conduct_chi_square_test=True, return_table=False
+            )
+            log_p_values.append(np.log(p_value))
 
+        log_p_values_dict[column_name] = log_p_values
+
+    log_chi_square_p_df = pd.DataFrame(log_p_values_dict)
+    log_chi_square_p_df = log_chi_square_p_df.replace(-np.inf, np.nan)
+    log_chi_square_p_mean = log_chi_square_p_df.mean().clip(min_log_p, 0).sort_values()[::-1]
+    
+    if plot_chart:
+        plt.figure(figsize=(17, 6))
+        log_chi_square_p_mean.plot.barh()
+        plt.show()
+        
+    if return_table:
+        return log_chi_square_p_df, log_chi_square_p_mean
+    
 def calculate_psi(expected, actual, buckettype='bins', buckets=1000, axis=0):
     '''Calculate the PSI (population stability index) across all variables
     Args:
@@ -568,7 +632,8 @@ def lgbm_feval_mae(preds, train_data):
     mae = np.abs(preds - labels).mean()
     return 'mae', mae, False
 
-def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", train_start_date=0, train_end_date=420, val_end_date=480, eval_freq=100, get_val_pred=True):
+def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", train_start_date=0, train_end_date=420, val_start_date=421, val_end_date=480, 
+               es=True, eval_freq=100, get_val_pred=True):
     """
     Train a LightGBM model with the specified data and parameters.
 
@@ -588,19 +653,21 @@ def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", t
     """
     cprint(f"{get_time_now()} Preparing Dataset...", color="green")
     train_data = get_lgbm_dataset(data, start_date=train_start_date, end_date=train_end_date, feature_list=feature_list, target=train_target) 
-    valid_data = get_lgbm_dataset(data, start_date=train_end_date + 1, end_date=val_end_date, feature_list=feature_list, target="target", free_raw_data=False)
+    valid_data = get_lgbm_dataset(data, start_date=val_start_date, end_date=val_end_date, feature_list=feature_list, target="target", free_raw_data=False)
     
     cprint(f"{get_time_now()} Training...", color="green")
+    callbacks = [log_evaluation(eval_freq)]
+    
+    if es:
+        callbacks += [early_stopping(eval_freq, first_metric_only=True, verbose=True, min_delta=5e-5)]
+        
     model = lgb.train(
         params=lgbm_params,
         train_set=train_data, 
         valid_sets=[valid_data, train_data], 
         feval=lgbm_feval_mae, 
         # categorical_feature=["stock_id"],
-        callbacks=[
-            log_evaluation(eval_freq),
-            early_stopping(eval_freq, first_metric_only=True, verbose=True, min_delta=1e-4)
-        ]
+        callbacks=callbacks
     )
     best_score = model.best_score["valid_0"]["l1"]
     del train_data
@@ -1170,7 +1237,7 @@ def calc_pct_chg_features(df, columns, groupby=["stock_id"], lag_distances=[1]):
         ).values
     return df
 
-def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_periods=[3, 6], verbose=0):
+def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_periods=[5], verbose=0):
     """
     Calculate interday gradient features for specified columns within a DataFrame.
 
@@ -1198,7 +1265,7 @@ def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_
                 else:
                     gradient, intercept = np.polyfit(range(len(w)), w, 1)
                     gradient_list.append(gradient)
-            gradients_dict[f"{column}_{lookback_period}days_gradient"] = gradient_list
+            gradients_dict[f"{column}_{lookback_period}d_grad"] = gradient_list
             
     gradients_df = pd.DataFrame(gradients_dict)
     df[gradients_df.columns] = gradients_df.values
@@ -1207,7 +1274,7 @@ def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_
 # ========================================================================================
 # 4. Master feature engineering functions for this competition
 # ========================================================================================
-def get_master_daily_target_data(master_df, verbose=0):
+def get_master_daily_target_data(master_df, missing_stock_dates, groupby=["stock_id", "date_id"], verbose=0):
     # Sort the dataframe first
     master_df = master_df.sort_values(by=META_COLUMNS).reset_index(drop=True)
     
@@ -1217,19 +1284,19 @@ def get_master_daily_target_data(master_df, verbose=0):
         master_subset = filter_df(master_df, seconds=seconds_period)
         
         # Calc the gradients for the intraday array
-        daily_target_grads = master_subset.groupby(["stock_id", "date_id"])["target"].apply(calc_intraday_gradient).apply(pd.Series)
+        daily_target_grads = master_subset.groupby(groupby)["target"].apply(calc_intraday_gradient).apply(pd.Series)
         daily_target_grads.columns = [f"target_r{round_}_grad"]
         daily_target_grads.drop(columns=f"target_r{round_}_intercept", errors="ignore", inplace=True)
         
         # Compute the agg statistics of target variable for every day
-        daily_target_stats = master_subset.groupby(["stock_id", "date_id"])["target"].agg(["mean", "std", "min", "max"]).add_prefix(f"daily_target_r{round_}_")
+        daily_target_stats = master_subset.groupby(groupby)["target"].agg(["mean", "std", "min", "max"]).add_prefix(f"daily_target_r{round_}_")
 
         # Compute the first order difference then the agg statistics (only mean is good I think) of target variable for every day
-        master_subset["target_fod"] = master_subset.groupby(["stock_id", "date_id"])["target"].diff(1)
-        daily_target_fod_stats = master_subset.groupby(["stock_id", "date_id"])["target_fod"].agg(["mean"]).add_prefix(f"target_fod_r{round_}_")
+        master_subset["target_fod"] = master_subset.groupby(groupby)["target"].diff(1)
+        daily_target_fod_stats = master_subset.groupby(groupby)["target_fod"].agg(["mean"]).add_prefix(f"target_fod_r{round_}_")
 
-        master_subset["target_sod"] = master_subset.groupby(["stock_id", "date_id"])["target_fod"].diff(1)
-        daily_target_sod_stats = master_subset.groupby(["stock_id", "date_id"])["target_sod"].agg(["mean"]).add_prefix(f"target_sod_r{round_}_")
+        master_subset["target_sod"] = master_subset.groupby(groupby)["target_fod"].diff(1)
+        daily_target_sod_stats = master_subset.groupby(groupby)["target_sod"].agg(["mean"]).add_prefix(f"target_sod_r{round_}_")
 
         # Horizontally stack all the dataframes above
         daily_target_data = pd.concat([daily_target_grads, daily_target_stats, daily_target_fod_stats, daily_target_sod_stats], axis=1)
@@ -1238,6 +1305,19 @@ def get_master_daily_target_data(master_df, verbose=0):
         master_daily_target_data.append(daily_target_data)
     
     master_daily_target_data = pd.concat(master_daily_target_data, axis=1)
+    master_daily_target_data = master_daily_target_data.reset_index()
+    
+    # Fill in the missing entries
+    for stock_id, date_id in missing_stock_dates:
+        master_daily_target_data.loc[master_daily_target_data.shape[0]] = (
+            filter_df(master_daily_target_data, stock_id=stock_id, date_id=(date_id - 1, date_id + 1)).mean(axis=0)
+        )
+    
+    # Sort the imputed rows to above, and cast back meta columns to integer and set them as index
+    master_daily_target_data = master_daily_target_data.sort_values(by=groupby).reset_index(drop=True)
+    master_daily_target_data[groupby] = master_daily_target_data[groupby].astype(np.int32)
+    master_daily_target_data = master_daily_target_data.set_index(groupby)
+        
     return master_daily_target_data
 
 def generate_interday_target_features(daily_target_data, merge_gt=False, shift=True, verbose=0):
