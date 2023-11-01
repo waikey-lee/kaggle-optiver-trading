@@ -907,7 +907,7 @@ def sort_df(df, sort_by=META_COLUMNS, reset_index=True):
     else:
         return df
 
-def clean_df(df, columns_to_drop=['row_id', 'time_id'], drop_null=False, verbose=0):
+def clean_df(df, missing_stock_dates=None, columns_to_drop=['row_id', 'time_id'], drop_null=False, verbose=0):
     """
     Clean and prepare a DataFrame for analysis.
 
@@ -946,9 +946,13 @@ def clean_df(df, columns_to_drop=['row_id', 'time_id'], drop_null=False, verbose
         )
     # Remove rows with missing imb_size (it can be any price / volume columns)
     # The assumption here is one missing => whole stock-date missing
-    if drop_null:
-        null_imb_size_index = df.loc[df["imb_size"].isnull()].index.tolist()
-        df = df.drop(null_imb_size_index, axis=0, errors="ignore")
+    if missing_stock_dates is not None:
+        null_indices = []
+        for stock_id, date_id in missing_stock_dates:
+            null_imb_size_index = df.loc[(df["stock_id"] == stock_id) & (df["date_id"] == date_id)].index.tolist()
+            null_indices.extend(null_imb_size_index)
+            
+        df = df.drop(null_indices, axis=0, errors="ignore").reset_index(drop=True)
     
     # I don't think the absolute magnitude is useful, we can replace it first
     # if we want to get the magnitude of raw imb volume, we can always take the abs() later
@@ -1010,7 +1014,7 @@ def get_volume_clippers(df, volume_cols, volume_clip_upper_percentile=VOLUME_CLI
         cprint(f"(-{upper_bound:,.0f}, {upper_bound:,.0f})", color="green")
     return volume_clippers
 
-def clip_df(df, price_clippers=None, volume_clippers=None):
+def clip_df(df, volume_clippers=None):
     """
     Clip specified columns in a DataFrame to specified bounds.
 
@@ -1041,15 +1045,15 @@ def clip_df(df, price_clippers=None, volume_clippers=None):
     flag_cols = get_cols(df, endswith="flag")
     base_cols = price_cols + volume_cols + flag_cols
     
-    if price_clippers is None:
-        price_clippers = get_price_clippers(df, price_cols)
+    # if price_clippers is None:
+    #     price_clippers = get_price_clippers(df, price_cols)
     
     if volume_clippers is None:
         volume_clippers = get_volume_clippers(df, volume_cols)
     
-    # Clip price columns
-    for price_col in price_cols:
-        df[price_col] = df[price_col].clip(*price_clippers[price_col])
+    # # Clip price columns
+    # for price_col in price_cols:
+    #     df[price_col] = df[price_col].clip(*price_clippers[price_col])
         
     # Clip volume columns
     for volume_col in volume_cols:
