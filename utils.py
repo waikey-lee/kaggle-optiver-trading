@@ -3,6 +3,7 @@
 # ========================================================================================
 import gc
 import joblib
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -15,8 +16,8 @@ from datetime import datetime, timedelta
 from itertools import repeat
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
-from pandarallel import pandarallel
-pandarallel.initialize(progress_bar=False, nb_workers=12)
+# from pandarallel import pandarallel
+# pandarallel.initialize(progress_bar=False, nb_workers=12)
 
 import scipy.cluster.hierarchy as sch
 from scipy.cluster.hierarchy import fcluster
@@ -163,6 +164,13 @@ def read_data(path='', columns=None, **kwargs):
         print("Unknown file format")
         data = "Nothing"
     return data
+
+def read_model(path=''):
+    filename = path.split("/")[-1]
+    if filename.startswith("lgbm") and filename.endswith(".txt"):
+        return lgb.Booster(model_file=path)
+    else:
+        return "X tau apa model format ini"
 
 # ========================================================================================
 # EDA check functions
@@ -949,6 +957,7 @@ def clean_df(df, missing_stock_dates=None, columns_to_drop=['row_id', 'time_id']
     if missing_stock_dates is not None:
         null_indices = []
         for stock_id, date_id in missing_stock_dates:
+            date_id = date_id[0]
             null_imb_size_index = df.loc[(df["stock_id"] == stock_id) & (df["date_id"] == date_id)].index.tolist()
             null_indices.extend(null_imb_size_index)
             
@@ -1008,13 +1017,13 @@ def get_volume_clippers(df, volume_cols, volume_clip_upper_percentile=VOLUME_CLI
     """
     volume_clippers = {}
     for volume_col in volume_cols:
-        upper_bound = int(round(np.percentile(df[volume_col].dropna(), 100 - volume_clip_upper_percentile), -3))
+        upper_bound = int(round(np.percentile(df[volume_col].dropna(), 100 - volume_clip_upper_percentile), -1))
         volume_clippers[volume_col] = (-upper_bound, upper_bound)
         cprint(f"For {volume_col}, the global clip bound is", end=" ", color="blue")
         cprint(f"(-{upper_bound:,.0f}, {upper_bound:,.0f})", color="green")
     return volume_clippers
 
-def clip_df(df, volume_clippers=None):
+def clip_df(df, price_clippers=None, volume_clippers=None):
     """
     Clip specified columns in a DataFrame to specified bounds.
 
@@ -1048,16 +1057,16 @@ def clip_df(df, volume_clippers=None):
     # if price_clippers is None:
     #     price_clippers = get_price_clippers(df, price_cols)
     
-    if volume_clippers is None:
-        volume_clippers = get_volume_clippers(df, volume_cols)
+    # if volume_clippers is None:
+    #     volume_clippers = get_volume_clippers(df, volume_cols)
     
     # # Clip price columns
     # for price_col in price_cols:
     #     df[price_col] = df[price_col].clip(*price_clippers[price_col])
         
-    # Clip volume columns
-    for volume_col in volume_cols:
-        df[volume_col] = df[volume_col].clip(*volume_clippers[volume_col])
+    # # Clip volume columns
+    # for volume_col in volume_cols:
+    #     df[volume_col] = df[volume_col].clip(*volume_clippers[volume_col])
     
     # Clip target columns (if applicable)
     if "target" in df.columns:
@@ -1156,6 +1165,18 @@ def scale_base_columns(df, _level_stats_df, base_columns, level_col="stock", joi
 # ========================================================================================
 # 3. Temporal Features Functions
 # ========================================================================================
+def increment_date_id(df, reset_index=True):
+    if "date_id" not in df.columns:
+        index = list(df.index.names)
+        if "date_id" in index:
+            df = df.reset_index()
+            df["date_id"] += 1
+            df = df.set_index(index)
+        return df
+    else:
+        df["date_id"] += 1
+        return df
+
 def calc_intraday_gradient(intraday_array):
     """
     Calculate the intraday gradient (slope) of a time series.
