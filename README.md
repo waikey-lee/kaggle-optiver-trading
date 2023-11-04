@@ -1,8 +1,5 @@
-# kaggle-optiver-trading
-For Kaggle competition Optiver
-
-# Setup your own local environment to run the codes in this Github Repo
-## Local code repository
+# Git and Conda Instructions
+## Setup Local code repository
 ### First time setup
 - Open your command prompt / terminal and change directory to your desired project folder to place this code repository `cd <your projects dir>`
 - Enter `git clone git@github.com:waikey-lee/kaggle-optiver-trading.git`
