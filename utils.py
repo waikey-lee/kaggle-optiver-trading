@@ -502,6 +502,8 @@ def run_chi_square_tests(df, feature_columns=None, target_col="target", feature_
     if feature_columns is None:
         feature_columns = list_diff(df.columns, ["stock_id", "date_id", "clipped_target", "target", "is_positive_target", "is_mild_target"])
     
+    # -745 is the magic number because np.exp(-745) is betul betul 0 in my Python 
+    magic_number = -745
     log_p_values_dict = {}
     for column_name in tqdm(feature_columns):
         log_p_values = []
@@ -515,7 +517,9 @@ def run_chi_square_tests(df, feature_columns=None, target_col="target", feature_
         log_p_values_dict[column_name] = log_p_values
 
     log_chi_square_p_df = pd.DataFrame(log_p_values_dict)
-    log_chi_square_p_df = log_chi_square_p_df.replace(-np.inf, np.nan)
+    log_chi_square_p_df = log_chi_square_p_df.replace(-np.inf, magic_number)
+    log_chi_square_p_df["stock_id"] = range(200)
+    log_chi_square_p_df = log_chi_square_p_df.set_index("stock_id")
     log_chi_square_p_mean = log_chi_square_p_df.mean().clip(min_log_p, 0).sort_values()[::-1]
     
     if plot_chart:
