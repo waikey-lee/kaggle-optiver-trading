@@ -24,6 +24,7 @@ from scipy.cluster.hierarchy import fcluster
 from scipy.stats import pearsonr, chi2_contingency
 
 import lightgbm as lgb
+from catboost import CatBoostRegressor
 from lightgbm import LGBMRegressor, log_evaluation, early_stopping
 
 # ========================================================================================
@@ -165,10 +166,13 @@ def read_data(path='', columns=None, **kwargs):
         data = "Nothing"
     return data
 
-def read_model(path=''):
-    filename = path.split("/")[-1]
+def read_model(filepath=''):
+    filename = filepath.split("/")[-1]
     if filename.startswith("lgbm") and filename.endswith(".txt"):
-        return lgb.Booster(model_file=path)
+        return lgb.Booster(model_file=filepath)
+    elif filename.endswith(".cbm"):
+        # Because this competition using Regressor, this is hard coded
+        return CatBoostRegressor().load_model(filepath)
     else:
         return "X tau apa model format ini"
 
