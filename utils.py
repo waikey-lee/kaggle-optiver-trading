@@ -481,7 +481,11 @@ def check_target_dependency(df, feature_col, target_col="target", feature_class=
     else:
         return chi2, p_value, dof, expected
 
-def run_chi_square_tests(df, feature_columns=None, target_col="target", feature_class=50, target_class=10, min_log_p=-745, plot_chart=False, return_table=True):
+def run_chi_square_tests(
+    train, feature_columns=None, target_col="target", 
+    feature_class=50, target_class=10, min_log_p=-745, 
+    plot_chart=False, top_n=30, return_table=True, verbose=1
+):
     """
     Perform chi-square tests for feature-target independence and return log-transformed p-values.
 
@@ -499,12 +503,16 @@ def run_chi_square_tests(df, feature_columns=None, target_col="target", feature_
         pd.DataFrame or tuple: If return_table is True, returns a DataFrame containing log-transformed p-values for each feature.
         If plot_chart is True, also plots a bar chart of log-transformed p-values.
     """
+    # Filter the dataframe so that we are always using the same dataset in calculating this chi-square log p
+    df = filter_df(train, date_id=(241, 480), seconds=(120, 540), reset_index=True)
+    assert df.shape[0] == 2061506, "The # of row is not tally"
+    
     # -745 is the magic number because np.exp(-745) is betul betul 0 in my Python
     if feature_columns is None:
         feature_columns = list_diff(df.columns, ["stock_id", "date_id", "clipped_target", "target", "is_positive_target", "is_mild_target"])
     
     log_p_values_dict = {}
-    for column_name in tqdm(feature_columns):
+    for column_name in tqdm(feature_columns, disable=not verbose):
         log_p_values = []
         for stock_id in range(200):
             chi2, p_value, dof, expected = check_target_dependency(
@@ -519,15 +527,15 @@ def run_chi_square_tests(df, feature_columns=None, target_col="target", feature_
     log_chi_square_p_df = log_chi_square_p_df.replace(-np.inf, min_log_p)
     log_chi_square_p_df["stock_id"] = range(200)
     log_chi_square_p_df = log_chi_square_p_df.set_index("stock_id")
-    log_chi_square_p_median = log_chi_square_p_df.median().sort_values()[::-1]
+    log_chi_square_p_metrics = 0.5 * log_chi_square_p_df.median() + 0.25 * (log_chi_square_p_df.apply(percentile(.25)) + log_chi_square_p_df.apply(percentile(.75)))
     
     if plot_chart:
         plt.figure(figsize=(17, 6))
-        log_chi_square_p_median.plot.barh()
+        log_chi_square_p_metrics.sort_values()[:top_n][::-1].plot.barh()
         plt.show()
         
     if return_table:
-        return log_chi_square_p_df, log_chi_square_p_median
+        return log_chi_square_p_df, log_chi_square_p_metrics
     
 def calculate_psi(expected, actual, buckettype='bins', buckets=1000, axis=0):
     '''Calculate the PSI (population stability index) across all variables
@@ -648,7 +656,7 @@ def lgbm_feval_mae(preds, train_data):
     return 'mae', mae, False
 
 def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", train_start_date=0, train_end_date=420, val_start_date=421, val_end_date=480, 
-               es=True, eval_freq=100, get_val_pred=True):
+               es=True, es_min_delta=5e-5, eval_freq=50, get_val_pred=True):
     """
     Train a LightGBM model with the specified data and parameters.
 
@@ -674,7 +682,8 @@ def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", t
     callbacks = [log_evaluation(eval_freq)]
     
     if es:
-        callbacks += [early_stopping(eval_freq, first_metric_only=True, verbose=True, min_delta=5e-5)]
+        es_patience = int(lgbm_params["n_estimators"] * 0.1)
+        callbacks += [early_stopping(es_patience, first_metric_only=True, verbose=True, min_delta=es_min_delta)]
         
     model = lgb.train(
         params=lgbm_params,
@@ -690,7 +699,7 @@ def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", t
     
     if get_val_pred:
         cprint(f"{get_time_now()} Getting Validation Prediction...", color="green")
-        val_df = filter_df(data, date_id=(train_end_date + 1, val_end_date))[META_COLUMNS].reset_index(drop=True)
+        val_df = filter_df(data, date_id=(val_start_date, val_end_date))[META_COLUMNS + ["target"]].reset_index(drop=True)
         val_df["val_pred"] = model.predict(valid_data.get_data())
     else:
         val_df = pd.DataFrame()
@@ -742,7 +751,7 @@ def plot_feature_importance(features=None, importances=None, imp_df=None, title=
     if return_df:
         return imp_df
 
-def get_feature_summary(lgbm_model, df, clustering_threshold=1):
+def get_feature_summary(lgbm_model, df, clustering_threshold=0.1):
     """
     Get a summary of feature importance and feature clustering for a given LightGBM model and dataset.
 
@@ -767,7 +776,7 @@ def get_feature_summary(lgbm_model, df, clustering_threshold=1):
     )
     cprint(f"{get_time_now()} Calculating Feature Correlation...", color="green")
     feature_list = feature_imp_df["feature"].tolist()
-    corr_df = df[feature_list].corr()
+    corr_df = df[feature_list].corr().fillna(0)
     
     # Assuming you have a correlation DataFrame named 'feature_correlations'
     # The linkage method and distance metric can be adjusted to suit your data
