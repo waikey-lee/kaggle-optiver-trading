@@ -482,8 +482,8 @@ def check_target_dependency(df, feature_col, target_col="target", feature_class=
         return chi2, p_value, dof, expected
 
 def run_chi_square_tests(
-    train, feature_columns=None, target_col="target", 
-    feature_class=50, target_class=10, min_log_p=-745, 
+    df, feature_columns=None, target_col="target", 
+    feature_class=30, target_class=10, min_log_p=-745, 
     plot_chart=False, top_n=30, return_table=True, verbose=1
 ):
     """
@@ -504,8 +504,8 @@ def run_chi_square_tests(
         If plot_chart is True, also plots a bar chart of log-transformed p-values.
     """
     # Filter the dataframe so that we are always using the same dataset in calculating this chi-square log p
-    df = filter_df(train, date_id=(241, 480), seconds=(120, 540), reset_index=True)
-    assert df.shape[0] == 2061506, "The # of row is not tally"
+    # df = filter_df(train, date_id=(241, 480), seconds=(300, 540), reset_index=True)
+    # assert df.shape[0] == 2061506, "The # of row is not tally"
     
     # -745 is the magic number because np.exp(-745) is betul betul 0 in my Python
     if feature_columns is None:
@@ -515,11 +515,14 @@ def run_chi_square_tests(
     for column_name in tqdm(feature_columns, disable=not verbose):
         log_p_values = []
         for stock_id in range(200):
-            chi2, p_value, dof, expected = check_target_dependency(
-                filter_df(df, stock_id=stock_id), feature_col=column_name, feature_class=feature_class, target_class=target_class, 
-                plot_chart=False, conduct_chi_square_test=True, return_table=False
-            )
-            log_p_values.append(np.log(p_value))
+            try:
+                chi2, p_value, dof, expected = check_target_dependency(
+                    filter_df(df, stock_id=stock_id), feature_col=column_name, feature_class=feature_class, target_class=target_class, 
+                    plot_chart=False, conduct_chi_square_test=True, return_table=False
+                )
+                log_p_values.append(np.log(p_value))
+            except:
+                log_p_values.append(0)
 
         log_p_values_dict[column_name] = log_p_values
 
