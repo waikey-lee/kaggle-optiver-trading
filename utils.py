@@ -37,8 +37,8 @@ META_COLUMNS = ["stock_id", "date_id", "seconds"]
 # ========================================================================================
 # 1. Clipping Config
 # ========================================================================================
-PRICE_CLIP_PERCENTILE = 0.01 # 1 - (2 * PRICE_CLIPPER_TAIL / 100) will remained unclip
-VOLUME_CLIPPER_UPPER_TAIL = 0.01 # only the top VOLUME_CLIPPER_UPPER_TAIL proportion will be clipped
+PRICE_CLIP_PERCENTILE = 0.005 # 1 - (2 * PRICE_CLIPPER_TAIL / 100) will remained unclip
+VOLUME_CLIPPER_UPPER_TAIL = 0.005 # only the top VOLUME_CLIPPER_UPPER_TAIL proportion will be clipped
 
 MIN_TARGET = -100 # Target lower than -100 will be clip to -100
 MAX_TARGET = 100 # Target higher than 100 will be clip to 100
@@ -754,6 +754,26 @@ def plot_feature_importance(features=None, importances=None, imp_df=None, title=
     if return_df:
         return imp_df
 
+def feature_group_corr_calc(df, columns, target_column="clipped_target", cluster_thresh=0.2):
+    corr_df = df.loc[:, columns + [target_column]].corr()
+
+    linkage_matrix = sch.linkage(corr_df.iloc[:-1, :-1].values, method='ward', metric='euclidean')
+
+    # Set a threshold or specify the number of clusters
+    clusters = fcluster(linkage_matrix, 0.2, criterion='distance')
+
+    corr_df.insert(0, "cluster", list(clusters) + [999])
+
+    corr_df["abs_corr"] = corr_df["clipped_target"].abs()
+
+    corr_df = corr_df.sort_values(by=["cluster", "abs_corr"], ascending=[True, False])
+    corr_df.drop(columns=["abs_corr"], inplace=True)
+    corr_df = corr_df.reindex(columns=["cluster"] + corr_df.index.tolist())
+
+    corr_df.index = corr_df.index + "(" + corr_df["cluster"].astype(str) + ")"
+    corr_df.drop(columns=["cluster"], inplace=True)
+    return corr_df
+
 def get_feature_summary(lgbm_model, df, clustering_threshold=0.1):
     """
     Get a summary of feature importance and feature clustering for a given LightGBM model and dataset.
@@ -1073,15 +1093,15 @@ def clip_df(df, price_clippers=None, volume_clippers=None):
     flag_cols = get_cols(df, endswith="flag")
     base_cols = price_cols + volume_cols + flag_cols
     
-    # if price_clippers is None:
-    #     price_clippers = get_price_clippers(df, price_cols)
+    if price_clippers is None:
+        price_clippers = get_price_clippers(df, price_cols)
     
     # if volume_clippers is None:
     #     volume_clippers = get_volume_clippers(df, volume_cols)
     
-    # # Clip price columns
-    # for price_col in price_cols:
-    #     df[price_col] = df[price_col].clip(*price_clippers[price_col])
+    # Clip price columns
+    for price_col in price_cols:
+        df[price_col] = df[price_col].clip(*price_clippers[price_col])
         
     # # Clip volume columns
     # for volume_col in volume_cols:
