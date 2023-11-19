@@ -1,3 +1,10 @@
 */.*
 .DS_Store
-data/
+data/optiver-train-data/
+data/optiver-memoryreduceddatasets/
+data/optiver-lgbm-models/
+data/optiver-trading-at-the-close/
+data/optiver-test-data/
+data/optiver-catboost-models/
+data/optiver-keras-models/
+
