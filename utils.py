@@ -168,7 +168,8 @@ def read_data(path='', columns=None, **kwargs):
 
 def read_model(filepath=''):
     filename = filepath.split("/")[-1]
-    if filename.startswith("lgbm") and filename.endswith(".txt"):
+    foldername = filepath.split("/")[-2]
+    if (filename.startswith("lgbm") or foldername.startswith("lgbm")) and filename.endswith(".txt"):
         return lgb.Booster(model_file=filepath)
     elif filename.endswith(".cbm"):
         # Because this competition using Regressor, this is hard coded
@@ -685,7 +686,16 @@ def train_lgbm(data, feature_list, lgbm_params, train_target="clipped_target", t
     callbacks = [log_evaluation(eval_freq)]
     
     if es:
-        es_patience = int(lgbm_params["n_estimators"] * 0.1)
+        if "num_iterations" in lgbm_params:
+            es_patience = int(lgbm_params["num_iterations"] * 0.1)
+        elif "n_estimators" in lgbm_params:
+            es_patience = int(lgbm_params["n_estimators"] * 0.1)
+        else:
+            es_patience = 125
+            
+        if es_patience <= 0:
+            es_patience = 125
+            
         callbacks += [early_stopping(es_patience, first_metric_only=True, verbose=True, min_delta=es_min_delta)]
         
     model = lgb.train(
@@ -1002,10 +1012,9 @@ def clean_df(df, missing_stock_dates=None, columns_to_drop=['row_id', 'time_id']
             
         df = df.drop(null_indices, axis=0, errors="ignore").reset_index(drop=True)
     
-    # I don't think the absolute magnitude is useful, we can replace it first
-    # if we want to get the magnitude of raw imb volume, we can always take the abs() later
-    if "imb_size" in df.columns and df["imb_size"].min() >= 0:
-        df["imb_size"] = df["imb_size"] * df["imb_flag"]
+    # Calculate the sum of ask and bid size (c_size) & the reverse weighted average price (c_price)
+    df["c_size"] = df["ask_size"] + df["bid_size"]
+    df["c_price"] = (df["ask_price"] * df["ask_size"] + df["bid_price"] * df["bid_size"]) / df["c_size"]
         
     return df
 
@@ -1303,7 +1312,7 @@ def calc_pct_chg_features(df, columns, groupby=["stock_id"], lag_distances=[1]):
         ).values
     return df
 
-def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_periods=[5], verbose=0):
+def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_periods=[5], period="d", verbose=0):
     """
     Calculate interday gradient features for specified columns within a DataFrame.
 
@@ -1323,15 +1332,15 @@ def calc_interday_gradient_features(df, columns, groupby=["stock_id"], lookback_
     """
     gradients_dict = dict()
     for column in tqdm(columns, disable=not verbose):
-        for lookback_period in lookback_periods:
+        for lookback in lookback_periods:
             gradient_list = []
             for i, w in enumerate(df.groupby(groupby)[column].rolling(lookback_period)):
-                if len(w) < lookback_period:
+                if len(w) < lookback:
                     gradient_list.append(np.nan)
                 else:
                     gradient, intercept = np.polyfit(range(len(w)), w, 1)
                     gradient_list.append(gradient)
-            gradients_dict[f"{column}_{lookback_period}d_grad"] = gradient_list
+            gradients_dict[f"{column}_{lookback}{period}_grad"] = gradient_list
             
     gradients_df = pd.DataFrame(gradients_dict)
     df[gradients_df.columns] = gradients_df.values
